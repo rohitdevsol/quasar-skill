@@ -1,11 +1,53 @@
 ---
 name: quasar
-description: Build Solana programs using the Quasar framework (quasar-lang). Use this skill whenever the user mentions Quasar, quasar-lang, quasar_lang, a zero-copy Solana program, or is building a Solana program that isn't using Anchor. Also trigger when the user asks about #[program], #[instruction(discriminator)], Ctx<T>, QuasarSvm, or the quasar CLI commands (quasar build, quasar new, quasar test, quasar deploy). If the user is writing any Rust Solana program with quasar_lang::prelude::*, use this skill immediately.
+description: Build Solana programs using the Quasar framework (quasar-lang / quasar-spl). Use this skill whenever the user mentions Quasar, quasar-lang, quasar_lang, or is building a Solana program with the Quasar framework. Also trigger when the user asks about #[program], #[instruction(discriminator)], Ctx<T>, QuasarSvm, quasar-spl, or the quasar CLI (quasar build, quasar new, quasar test, quasar deploy). If the user is writing any Rust file that imports quasar_lang::prelude::* or quasar_spl, use this skill immediately. Do NOT generate Anchor code — Quasar has a completely different API.
 ---
  
 # Quasar — Zero-Copy Solana Program Framework
  
-Quasar is a Rust framework for Solana programs. It provides Anchor-compatible ergonomics with lower compute unit overhead by using zero-copy pointer casts to `#[repr(C)]` companion structs — no heap allocation, no deserialization.
+Quasar is a `no_std` Solana program framework. Accounts are pointer-cast directly from the SVM input buffer — no deserialization, no heap allocation. The syntax resembles Anchor but the generated code and types are completely different. **Never use Anchor types or patterns.**
+ 
+---
+ 
+## Cargo.toml
+ 
+```toml
+[package]
+name = "my_program"
+version = "0.1.0"
+edition = "2021"
+ 
+[lib]
+crate-type = ["cdylib"]
+ 
+[features]
+alloc = []
+client = []
+ 
+[dependencies]
+quasar-lang = { git = "https://github.com/blueshift-gg/quasar" }
+quasar-spl  = { git = "https://github.com/blueshift-gg/quasar" }  # only if using SPL tokens
+ 
+[dev-dependencies]
+my_program-client = { path = "target/client/rust/my_program-client" }
+quasar-svm        = { git = "https://github.com/blueshift-gg/quasar-svm" }
+solana-address    = { version = "2.2.0", features = ["decode"] }
+solana-keypair    = "3.1.2"
+solana-pubkey     = { version = "4.1.0" }
+```
+ 
+## Quasar.toml
+ 
+```toml
+[project]
+name = "my_program"
+ 
+[toolchain]
+type = "solana"
+ 
+[testing]
+framework = "quasarsvm-rust"
+```
  
 ---
  
@@ -13,36 +55,33 @@ Quasar is a Rust framework for Solana programs. It provides Anchor-compatible er
  
 ```
 my-program/
-├── Quasar.toml           # project config (toolchain, client languages)
-├── src/
-│   ├── lib.rs            # #[program] entry point
-│   ├── state.rs          # #[account] types
-│   ├── errors.rs         # #[error_code] enum
-│   └── instructions/
-│       ├── mod.rs
-│       ├── deposit.rs
-│       └── withdraw.rs
-└── client/               # auto-generated from IDL
-    └── src/lib.rs
+├── Cargo.toml
+├── Quasar.toml
+└── src/
+    ├── lib.rs
+    ├── state.rs
+    ├── event.rs
+    ├── errors.rs
+    └── instructions/
+        ├── mod.rs
+        ├── deposit.rs
+        └── withdraw.rs
 ```
  
 ---
  
-## Core Imports
- 
-Every program file starts with:
+## lib.rs — entry point
  
 ```rust
-#![no_std]
+#![cfg_attr(not(test), no_std)]   // no_std on-chain, std available in tests
+ 
 use quasar_lang::prelude::*;
-```
+mod instructions;
+use instructions::*;
+mod state;
+mod event;
  
----
- 
-## Defining the Program
- 
-```rust
-declare_id!("11111111111111111111111111111111");
+declare_id!("YourBase58ProgramIdHere111111111111111111111");
  
 #[program]
 mod my_program {
@@ -58,208 +97,321 @@ mod my_program {
         ctx.accounts.withdraw(amount)
     }
 }
+ 
+#[cfg(test)]
+mod tests;
 ```
  
-Key rules:
+Rules:
+- `#![cfg_attr(not(test), no_std)]` — not just `#![no_std]`; this lets tests use std.
 - `#[program]` goes on a `mod`, not a struct.
-- Every handler needs `#[instruction(discriminator = N)]` — no two instructions share the same discriminator. Discriminators can be a single integer (`= 0`) or a byte array (`= [1, 0, 0, 0]`).
-- First parameter is always `ctx: Ctx<T>` where `T` is the accounts struct.
+- Every handler needs `#[instruction(discriminator = N)]`. No two instructions share the same value.
+- First parameter is always `ctx: Ctx<T>` where `T` is the accounts struct name.
 - Return type is always `Result<(), ProgramError>`.
+ 
+---
+ 
+## Account Types — QUASAR ONLY
+ 
+Quasar accounts are **references with a `'info` lifetime**, not owned wrappers. Every field in a `#[derive(Accounts)]` struct is a reference.
+ 
+| Use case | Type |
+|---|---|
+| Signer (mutable) | `&'info mut Signer` |
+| Signer (read-only) | `&'info Signer` |
+| Unvalidated account | `&'info mut UncheckedAccount` |
+| Typed on-chain account (writable) | `&'info mut Account<MyStruct>` |
+| Typed on-chain account (read-only) | `&'info Account<MyStruct>` |
+| System program | `&'info Program<s>` |
+| SPL token mint | `&'info Account<Mint>` |
+| SPL token account | `&'info mut Account<Token>` |
+| SPL token program | `&'info Program<Token>` |
+ 
+**Never write `Account<'info, T>`, `Signer<'info>`, or `Program<'info, T>` — those are Anchor types and will not compile in Quasar.**
  
 ---
  
 ## Accounts Struct (`#[derive(Accounts)]`)
  
 ```rust
+use quasar_lang::prelude::*;
+ 
 #[derive(Accounts)]
 pub struct Deposit<'info> {
-    #[account(mut, signer)]
-    pub user: UncheckedAccount<'info>,
+    pub signer: &'info mut Signer,
  
-    #[account(
-        mut,
-        seeds = [b"vault", user.key().as_ref()],
-        payer = user,
-        space = Vault::SIZE,
-    )]
-    pub vault: Account<'info, Vault>,
+    #[account(mut, seeds = [b"vault", signer], bump)]
+    pub vault: &'info mut UncheckedAccount,
  
-    pub system_program: Program<'info, System>,
+    pub system_program: &'info Program<s>,
 }
 ```
  
-### Field attributes
+### Field constraints (on `#[account(...)]`)
  
-| Attribute | Meaning |
-|-----------|---------|
+| Constraint | Meaning |
+|---|---|
 | `mut` | Account must be writable |
-| `signer` | Account must have signed the transaction |
-| `address = <expr>` | Account address must equal `<expr>` |
 | `seeds = [s, ...]` | Derive PDA and verify address matches |
-| `init` | Create account via CPI (fails if already exists) |
+| `bump` | Auto-derive and verify the canonical bump |
+| `bump = field.bump` | Use stored bump instead of re-deriving (cheaper) |
+| `init` | Create account via CPI; fails if already exists |
 | `init_if_needed` | Create account only if it doesn't exist |
-| `payer = <field>` | Which signer pays for account rent |
-| `space = <expr>` | Byte size for account creation |
+| `payer = <field>` | Which signer pays rent for account creation |
+| `space = <expr>` | Byte size when creating |
+| `address = <expr>` | Account address must equal expression |
+| `has_one = <field>` | `self.<account>.<field> == self.<field>.address()` |
+| `constraint = <expr>` | Arbitrary boolean — fails if false |
+| `close = <field>` | Close account, send rent lamports to `<field>` |
+| `token::mint = <field>` | SPL token account init — set mint |
+| `token::authority = <field>` | SPL token account init — set authority |
  
-### Account wrapper types
+### Address access
  
-| Type | Checks |
-|------|--------|
-| `Account<'info, T>` | Owner, discriminator, size |
-| `Signer<'info>` | Must be a signer |
-| `UncheckedAccount<'info>` | No automatic checks — validate manually |
-| `Program<'info, T>` | Must be executable, matches known ID |
-| `SystemAccount<'info>` | Owned by system program |
+```rust
+// Get the address of any account — the method is .address(), NOT .key()
+self.maker.address()      // returns &Address
+self.escrow.address()
+*self.maker.address()     // dereference to get Address value
+```
  
 ---
  
 ## On-Chain Account Types (`#[account]`)
  
 ```rust
+use quasar_lang::prelude::*;
+ 
 #[account(discriminator = 1)]
-pub struct Vault {
-    pub owner: Address,
-    pub amount: u64,
+pub struct Escrow {
+    pub maker: Address,
+    pub mint_a: Address,
+    pub mint_b: Address,
+    pub maker_token_account_for_mint_b: Address,
+    pub receive: u64,
     pub bump: u8,
 }
 ```
  
 - `discriminator` must be non-zero.
-- Generates a zero-copy companion struct `ZcVault` with `#[repr(C)]` layout and alignment-1 `Pod*` fields.
-- Implements `Discriminator`, `Space`, `Owner`, `AccountCheck`, `ZeroCopyDeref`.
-- Use `T::SIZE` for `space =` in account constraints.
+- Field types: `Address` (32-byte pubkey), `u64`, `u8`, `bool`, or Pod types.
+- Use `T::SIZE` in `space =` constraints.
+- `set_inner(...)` — positional setter generated for the struct, sets all fields at once:
  
-### Pod integer types (use inside `#[account]` structs for zero-copy correctness)
+```rust
+self.escrow.set_inner(
+    *self.maker.address(),
+    *self.mint_a.address(),
+    *self.mint_b.address(),
+    *self.maker_token_account_for_mint_b.address(),
+    receive,
+    bumps.escrow,
+);
+```
  
-`PodU16`, `PodU32`, `PodU64`, `PodU128`, `PodI16`, `PodI32`, `PodI64`, `PodI128`, `PodBool`
+---
+ 
+## Events (`#[event(discriminator = N)]`)
+ 
+```rust
+use quasar_lang::prelude::*;
+ 
+#[event(discriminator = 0)]
+pub struct MakeEvent {
+    pub escrow: Address,
+    pub maker: Address,
+    pub deposit: u64,
+    pub receive: u64,
+}
+```
+ 
+Emit inside an instruction impl:
+ 
+```rust
+emit!(MakeEvent {
+    escrow: *self.escrow.address(),
+    maker: *self.maker.address(),
+    deposit,
+    receive,
+});
+```
+ 
+**`#[event]` without a discriminator does not exist in Quasar. Always provide `discriminator = N`.**
  
 ---
  
 ## Errors (`#[error_code]`)
  
 ```rust
+use quasar_lang::prelude::*;
+ 
 #[error_code]
 pub enum MyError {
-    #[msg("amount must be greater than zero")]
-    InvalidAmount,
-    #[msg("vault is locked")]
-    VaultLocked,
+    #[msg("unauthorized")]
+    Unauthorized,     // → Custom(3000)
+    #[msg("zero amount")]
+    ZeroAmount,       // → Custom(3001)
 }
 ```
  
----
+Error codes start at 3000 and increment per variant.
  
-## Events (`#[event]`)
+Assertion macros:
  
 ```rust
-#[event]
-pub struct DepositEvent {
-    pub user: Address,
-    pub amount: u64,
+require!(amount > 0, MyError::ZeroAmount);
+require_eq!(a, b, MyError::Unauthorized);
+require_keys_eq!(self.escrow.maker, *self.maker.address(), MyError::Unauthorized);
+```
+ 
+---
+ 
+## System Program CPI
+ 
+```rust
+// Transfer SOL — signer signs directly
+self.system_program.transfer(self.signer, self.vault, amount).invoke()?;
+ 
+// Transfer SOL from a PDA — PDA signs via bump seeds
+let seeds = bumps.vault_seeds();
+self.system_program.transfer(self.vault, self.signer, amount).invoke_signed(&seeds)?;
+ 
+// Direct lamport manipulation for program-owned accounts (no CPI needed)
+let vault = self.vault.to_account_view();
+let signer = self.signer.to_account_view();
+set_lamports(vault, vault.lamports() - amount);
+set_lamports(signer, signer.lamports() + amount);
+```
+ 
+---
+ 
+## SPL Token CPI (`quasar-spl`)
+ 
+```rust
+use quasar_spl::{Mint, Token, TokenCpi};
+```
+ 
+```rust
+// Transfer tokens — authority signs directly
+self.token_program
+    .transfer(from_ata, to_ata, authority, amount)
+    .invoke()?;
+ 
+// Transfer tokens from PDA-owned account — PDA signs
+let seeds = bumps.escrow_seeds();
+self.token_program
+    .transfer(
+        self.vault_token_account_for_mint_a,
+        self.dest_ata,
+        self.escrow,                                      // PDA as authority
+        self.vault_token_account_for_mint_a.amount(),     // .amount() reads token balance
+    )
+    .invoke_signed(&seeds)?;
+ 
+// Close a token account, send rent to destination
+self.token_program
+    .close_account(self.vault_token_account_for_mint_a, self.maker, self.escrow)
+    .invoke_signed(&seeds)?;
+```
+ 
+---
+ 
+## PDA Bump Seeds for Signed CPI
+ 
+When you use `seeds = [b"escrow", maker]` and `bump` in the accounts struct, the macro generates a `<StructName>Bumps` companion (e.g. `MakeBumps`). Bumps are available in instruction impls via the `bumps` parameter:
+ 
+```rust
+pub fn make_escrow(&mut self, receive: u64, bumps: &MakeBumps) -> Result<(), ProgramError> {
+    // bumps.escrow         → u8, the canonical bump for the escrow PDA
+    // bumps.escrow_seeds() → full seed slice for invoke_signed
+    let seeds = bumps.escrow_seeds();
+    // ...
 }
 ```
  
-Emit inside a handler:
+Always store the bump in state during `init`:
  
 ```rust
-emit!(DepositEvent { user: *ctx.accounts.user.key(), amount });
+self.escrow.set_inner(..., bumps.escrow);
 ```
  
----
- 
-## Constraint Macros
- 
-```rust
-require!(amount > 0, MyError::InvalidAmount);
-require_eq!(vault.owner, *user.key(), MyError::Unauthorized);
-require_keys_eq!(vault.mint, mint.key(), MyError::WrongMint);
-```
- 
----
- 
-## PDAs
- 
-```rust
-// In accounts struct — Quasar derives and verifies automatically:
-#[account(seeds = [b"vault", user.key().as_ref()])]
-pub vault: Account<'info, Vault>,
- 
-// Access the bump from ctx:
-let bump = ctx.bumps.vault;
- 
-// Manual verification (lower-level):
-verify_program_address(&[b"vault", user.key().as_ref(), &[bump]], &crate::ID, &vault.key())?;
-```
- 
----
- 
-## CPI (Cross-Program Invocation)
- 
-```rust
-// System program transfer
-System::transfer(
-    ctx.accounts.from.to_account_view(),
-    ctx.accounts.to.to_account_view(),
-    amount,
-)?;
- 
-// With PDA signer seeds
-System::transfer_signed(
-    ctx.accounts.vault.to_account_view(),
-    ctx.accounts.user.to_account_view(),
-    amount,
-    &[Seed::from(b"vault"), Seed::from(user.key().as_ref()), Seed::from(&[bump])],
-)?;
-```
+On subsequent calls, reuse it with `bump = escrow.bump` instead of re-deriving (saves CUs).
  
 ---
  
 ## Tests with `QuasarSvm`
  
-Tests run in-process against `QuasarSvm` — no local validator needed.
+Tests use `quasar-svm` — no local validator needed. The client crate is auto-generated by `quasar build`.
  
 ```rust
+// src/tests.rs
 extern crate std;
-use {
-    quasar_svm::{Account, Instruction, Pubkey, QuasarSvm},
-    my_program_client::*,
-    std::println,
-};
+ 
+use quasar_svm::{Account, Instruction, Pubkey, QuasarSvm};
+use solana_address::Address;
+use my_program_client::{DepositInstruction, WithdrawInstruction};
  
 fn setup() -> QuasarSvm {
-    let elf = std::fs::read("../../target/deploy/my_program.so").unwrap();
-    QuasarSvm::new().with_program(&crate::ID, &elf)
-}
- 
-#[test]
-fn test_deposit() {
-    let mut svm = setup();
-    let user = Pubkey::new_unique();
-    let (vault, _) = Pubkey::find_program_address(&[b"vault", user.as_ref()], &crate::ID);
- 
-    let ix: Instruction = DepositInstruction {
-        user,
-        vault,
-        system_program: quasar_svm::system_program::ID,
-        amount: 1_000_000_000,
-    }.into();
- 
-    let result = svm.process_instruction(&ix, &[
-        quasar_svm::token::create_keyed_system_account(&user, 10_000_000_000),
-        Account { address: vault, lamports: 0, data: vec![], owner: quasar_svm::system_program::ID, executable: false },
-    ]);
- 
-    assert!(result.is_ok(), "{:?}", result.raw_result);
-    println!("CU: {}", result.compute_units_consumed);
+    let elf = include_bytes!("../target/deploy/my_program.so");
+    QuasarSvm::new().with_program(&Pubkey::from(crate::ID), elf)
 }
 ```
  
-For token programs:
+### QuasarSvm API
  
 ```rust
-QuasarSvm::new()
-    .with_program(&crate::ID, &elf)
-    .with_token_program()
+// Pre-load accounts (use for complex test setup)
+svm.set_account(Account {
+    address: pubkey,
+    lamports: 1_000_000_000,
+    data: vec![],
+    owner: quasar_svm::system_program::ID,
+    executable: false,
+});
+ 
+// Built-in account helpers
+quasar_svm::token::create_keyed_system_account(&pubkey, lamports)
+quasar_svm::token::create_keyed_mint_account(&mint_pubkey, &Mint { ... })
+quasar_svm::token::create_keyed_associated_token_account(&owner, &mint, token_amount)
+ 
+// Execute instruction
+// Pass accounts NOT already loaded via set_account
+let result = svm.process_instruction(&instruction, &[account1, account2]);
+ 
+// Chain instructions — result.accounts contains updated state
+let result2 = svm.process_instruction(&next_ix, &result.accounts);
+ 
+// Assertions
+result.assert_success();
+result.assert_error(quasar_svm::ProgramError::Custom(3002));
+result.assert_error(quasar_svm::ProgramError::Runtime(String::from("IllegalOwner")));
+ 
+// Read an account from the result
+result.account(&pubkey)   // Option<Account>
+```
+ 
+### Building client instructions
+ 
+Client instruction structs are named `<InstructionName>Instruction` in PascalCase. Convert to `Instruction` via `.into()`:
+ 
+```rust
+let ix: Instruction = DepositInstruction {
+    signer: Address::from(user.to_bytes()),
+    vault,
+    system_program: Address::from(quasar_svm::system_program::ID.to_bytes()),
+    amount: 1_000_000_000,
+}.into();
+ 
+let result = svm.process_instruction(&ix, &[
+    quasar_svm::token::create_keyed_system_account(&user, 10_000_000_000),
+    Account {
+        address: vault,
+        lamports: 0,
+        data: vec![],
+        owner: crate::ID,
+        executable: false,
+    },
+]);
 ```
  
 ---
@@ -267,95 +419,63 @@ QuasarSvm::new()
 ## CLI Commands
  
 ```bash
-quasar init <name>          # scaffold a new project
-quasar build                # compile to BPF (.so)
-quasar build --watch        # recompile on file change
-quasar build --debug        # debug build
-quasar test                 # run tests (cargo test under the hood)
-quasar deploy               # deploy to cluster in Quasar.toml
-quasar new instruction <name>  # scaffold a new instruction file
-quasar idl                  # generate IDL
-quasar clean                # clean build artifacts
-quasar cfg                  # manage global config
+quasar init <name>            # scaffold new project
+quasar build                  # compile to .so + generate client crate
+quasar build --watch          # recompile on change
+quasar build --debug          # debug build
+quasar test                   # cargo test (builds first)
+quasar deploy                 # deploy to cluster in Quasar.toml
+quasar new instruction <name> # scaffold a new instruction file
+quasar idl                    # generate IDL only
+quasar clean                  # clean artifacts
+quasar cfg                    # manage global config
 ```
+ 
+**Always run `quasar build` before `quasar test`** — tests use `include_bytes!` on the compiled `.so`.
  
 ---
  
-## Quasar.toml
+## Complete Example — Vault (SOL deposit/withdraw)
  
-```toml
-[toolchain]
-type = "solana"      # or "native" for sbpf-linker
- 
-[client]
-languages = ["rust", "typescript"]
-```
- 
----
- 
-## Complete Minimal Example
- 
+### src/instructions/deposit.rs
 ```rust
-// src/lib.rs
-#![no_std]
 use quasar_lang::prelude::*;
  
-mod instructions;
-use instructions::*;
-mod state;
+#[derive(Accounts)]
+pub struct Deposit<'info> {
+    pub signer: &'info mut Signer,
+    #[account(mut, seeds = [b"vault", signer], bump)]
+    pub vault: &'info mut UncheckedAccount,
+    pub system_program: &'info Program<s>,
+}
  
-declare_id!("YourProgramIdHere1111111111111111111111111");
- 
-#[program]
-mod my_program {
-    use super::*;
- 
-    #[instruction(discriminator = 0)]
-    pub fn initialize(ctx: Ctx<Initialize>, amount: u64) -> Result<(), ProgramError> {
-        ctx.accounts.initialize(amount, &ctx.bumps)
+impl<'info> Deposit<'info> {
+    #[inline(always)]
+    pub fn deposit(&mut self, amount: u64) -> Result<(), ProgramError> {
+        self.system_program.transfer(self.signer, self.vault, amount).invoke()?;
+        Ok(())
     }
 }
 ```
  
+### src/instructions/withdraw.rs
 ```rust
-// src/state.rs
 use quasar_lang::prelude::*;
- 
-#[account(discriminator = 1)]
-pub struct MyAccount {
-    pub owner: Address,
-    pub amount: PodU64,
-    pub bump: u8,
-}
-```
- 
-```rust
-// src/instructions/initialize.rs
-use quasar_lang::prelude::*;
-use crate::state::MyAccount;
  
 #[derive(Accounts)]
-pub struct Initialize<'info> {
-    #[account(mut, signer)]
-    pub user: UncheckedAccount<'info>,
- 
-    #[account(
-        init,
-        seeds = [b"account", user.key().as_ref()],
-        payer = user,
-        space = MyAccount::SIZE,
-    )]
-    pub my_account: Account<'info, MyAccount>,
- 
-    pub system_program: Program<'info, System>,
+pub struct Withdraw<'info> {
+    pub signer: &'info mut Signer,
+    #[account(mut, seeds = [b"vault", signer], bump)]
+    pub vault: &'info mut UncheckedAccount,
 }
  
-impl<'info> Initialize<'info> {
-    pub fn initialize(&mut self, amount: u64, bumps: &InitializeBumps) -> Result<(), ProgramError> {
-        let acc = self.my_account.as_mut();
-        acc.owner = *self.user.key();
-        acc.amount = amount.into();
-        acc.bump = bumps.my_account;
+impl<'info> Withdraw<'info> {
+    #[inline(always)]
+    pub fn withdraw(&self, amount: u64) -> Result<(), ProgramError> {
+        let vault = self.vault.to_account_view();
+        let signer = self.signer.to_account_view();
+        set_lamports(vault, vault.lamports() - amount);
+        set_lamports(signer, signer.lamports() + amount);
         Ok(())
     }
 }
@@ -363,16 +483,123 @@ impl<'info> Initialize<'info> {
  
 ---
  
-## Key Differences from Anchor
+## Complete Example — Escrow (SPL token swap)
  
-| | Anchor | Quasar |
-|---|---|---|
-| Account access | Borsh deserialization | Zero-copy pointer cast |
-| Context type | `Context<T>` | `Ctx<T>` |
-| Program macro | `#[program]` on mod | `#[program]` on mod |
-| Discriminators | Auto-generated from name hash | Explicit `discriminator = N` |
-| Testing | LiteSVM / bankrun | `QuasarSvm` (built-in) |
-| `no_std` | No | Yes |
-| Address type | `Pubkey` | `Address` |
-| Int types | `u64` directly | `PodU64` in account structs |
+### src/state.rs
+```rust
+use quasar_lang::prelude::*;
+ 
+#[account(discriminator = 1)]
+pub struct Escrow {
+    pub maker: Address,
+    pub mint_a: Address,
+    pub mint_b: Address,
+    pub maker_token_account_for_mint_b: Address,
+    pub receive: u64,
+    pub bump: u8,
+}
+```
+ 
+### src/instructions/make.rs
+```rust
+use quasar_lang::prelude::*;
+use quasar_spl::{Mint, Token, TokenCpi};
+use crate::state::Escrow;
+ 
+#[derive(Accounts)]
+pub struct Make<'info> {
+    pub maker: &'info mut Signer,
+ 
+    #[account(init, payer = maker, seeds = [b"escrow", maker], bump)]
+    pub escrow: &'info mut Account<Escrow>,
+ 
+    pub mint_a: &'info Account<Mint>,
+    pub mint_b: &'info Account<Mint>,
+ 
+    pub maker_token_account_for_mint_a: &'info mut Account<Token>,
+ 
+    #[account(init_if_needed, payer = maker, token::mint = mint_b, token::authority = maker)]
+    pub maker_token_account_for_mint_b: &'info mut Account<Token>,
+ 
+    #[account(init_if_needed, payer = maker, token::mint = mint_a, token::authority = escrow)]
+    pub vault_token_account_for_mint_a: &'info mut Account<Token>,
+ 
+    pub token_program: &'info Program<Token>,
+    pub system_program: &'info Program<s>,
+}
+ 
+impl<'info> Make<'info> {
+    pub fn make_escrow(&mut self, receive: u64, bumps: &MakeBumps) -> Result<(), ProgramError> {
+        self.escrow.set_inner(
+            *self.maker.address(),
+            *self.mint_a.address(),
+            *self.mint_b.address(),
+            *self.maker_token_account_for_mint_b.address(),
+            receive,
+            bumps.escrow,
+        );
+        Ok(())
+    }
+ 
+    pub fn deposit_tokens(&mut self, amount: u64) -> Result<(), ProgramError> {
+        self.token_program
+            .transfer(
+                self.maker_token_account_for_mint_a,
+                self.vault_token_account_for_mint_a,
+                self.maker,
+                amount,
+            )
+            .invoke()
+    }
+}
+```
+ 
+### src/instructions/refund.rs
+```rust
+use quasar_lang::prelude::*;
+use quasar_spl::{Mint, Token, TokenCpi};
+use crate::state::Escrow;
+ 
+#[derive(Accounts)]
+pub struct Refund<'info> {
+    pub maker: &'info mut Signer,
+ 
+    #[account(
+        has_one = maker,
+        close = maker,
+        seeds = [b"escrow", maker],
+        bump = escrow.bump
+    )]
+    pub escrow: &'info mut Account<Escrow>,
+ 
+    pub mint_a: &'info Account<Mint>,
+ 
+    #[account(init_if_needed, payer = maker, token::mint = mint_a, token::authority = maker)]
+    pub maker_token_account_for_mint_a: &'info mut Account<Token>,
+ 
+    pub vault_token_account_for_mint_a: &'info mut Account<Token>,
+ 
+    pub token_program: &'info Program<Token>,
+    pub system_program: &'info Program<s>,
+}
+ 
+impl<'info> Refund<'info> {
+    pub fn withdraw_tokens_and_close(&mut self, bumps: &RefundBumps) -> Result<(), ProgramError> {
+        let seeds = bumps.escrow_seeds();
+ 
+        self.token_program
+            .transfer(
+                self.vault_token_account_for_mint_a,
+                self.maker_token_account_for_mint_a,
+                self.escrow,
+                self.vault_token_account_for_mint_a.amount(),
+            )
+            .invoke_signed(&seeds)?;
+ 
+        self.token_program
+            .close_account(self.vault_token_account_for_mint_a, self.maker, self.escrow)
+            .invoke_signed(&seeds)
+    }
+}
+```
  
