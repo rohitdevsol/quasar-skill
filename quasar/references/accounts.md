@@ -6,37 +6,42 @@ Full reference for `#[derive(Accounts)]`, account types, constraints, dynamic fi
 
 ## All Account Field Types
 
-Every field is a **reference** with `'info` lifetime. Never use Anchor-style owned wrappers.
+Account fields do not use lifetimes. Never use Anchor-style owned wrappers.
+Mark writability with `#[account(mut)]` on the field.
 
 ```rust
 // Signers
-pub signer:     &'info mut Signer           // must sign + writable
-pub reader:     &'info Signer               // must sign, read-only
+#[account(mut)]
+pub signer:     Signer                      // must sign + writable
+pub reader:     Signer                      // must sign, read-only
 
 // Unvalidated
-pub unchecked:  &'info mut UncheckedAccount // writable, no checks — validate manually
-pub readonly:   &'info UncheckedAccount     // read-only, no checks
+#[account(mut)]
+pub unchecked:  UncheckedAccount            // writable, no checks — validate manually
+pub readonly:   UncheckedAccount            // read-only, no checks
 
 // Typed (fixed fields only)
-pub account:    &'info mut Account<MyStruct>
-pub readonly:   &'info Account<MyStruct>
+#[account(mut)]
+pub account:    Account<MyStruct>
+pub readonly:   Account<MyStruct>
 
-// Typed with dynamic fields (String/Vec) — thread the lifetime, no & ref
-pub config:     Account<MultisigConfig<'info>>      // writable (default when init/init_if_needed)
-pub config_ro:  Account<MultisigConfig<'info>>      // read-only (no mut constraint)
+// Typed with dynamic fields (String/Vec)
+pub config:     Account<MultisigConfig>      // writable (default when init/init_if_needed)
+pub config_ro:  Account<MultisigConfig>      // read-only (no mut constraint)
 
 // Programs
-pub system_program: &'info Program<s>              // Solana system program
-pub token_program:  &'info Program<Token>          // SPL token
-pub token22_program: &'info Program<Token22>       // Token-2022
+pub system_program: Program<System>          // Solana system program
+pub token_program:  Program<Token>           // SPL token
+pub token22_program: Program<Token22>        // Token-2022
 
 // Sysvars
-pub rent:   &'info Sysvar<Rent>
-pub clock:  &'info Sysvar<Clock>
+pub rent:   Sysvar<Rent>
+pub clock:  Sysvar<Clock>
 
 // SPL token accounts (from quasar-spl)
-pub mint:   &'info Account<Mint>              // read-only mint
-pub token:  &'info mut Account<Token>         // writable token account
+pub mint:   Account<Mint>                     // read-only mint
+#[account(mut)]
+pub token:  Account<Token>                    // writable token account
 ```
 
 Address access for any type: `.address()` — returns `&Address`.
@@ -103,27 +108,28 @@ Use when the account needs variable-length data.
 ```rust
 use quasar_lang::prelude::*;
 
-// String<'lifetime, MAX_BYTES>
-// Vec<'lifetime, ElementType, MAX_COUNT>
+// String<MAX_BYTES>
+// Vec<ElementType, MAX_COUNT>
 
 #[account(discriminator = 2)]
-pub struct Profile<'a> {
+pub struct Profile {
     pub owner:    Address,
     pub score:    u64,
-    pub name:     String<'a, 64>,        // up to 64 bytes
-    pub bio:      String<'a, 512>,       // up to 512 bytes
-    pub friends:  Vec<'a, Address, 16>,  // up to 16 addresses
-    pub scores:   Vec<'a, PodU64, 8>,    // up to 8 u64s
+    pub name:     String<64>,            // up to 64 bytes
+    pub bio:      String<512>,           // up to 512 bytes
+    pub friends:  Vec<Address, 16>,      // up to 16 addresses
+    pub scores:   Vec<PodU64, 8>,        // up to 8 u64s
 }
 ```
 
-When a struct has dynamic fields, the accounts field type **threads the lifetime** instead of using `&'info`:
+Use the same account field style for fixed and dynamic account data types:
 ```rust
-// Fixed struct → use & reference
-pub escrow:  &'info mut Account<Escrow>,
+// Fixed struct
+#[account(mut)]
+pub escrow:  Account<Escrow>,
 
-// Dynamic struct → thread lifetime, no &
-pub profile: Account<Profile<'info>>,
+// Dynamic struct
+pub profile: Account<Profile>,
 ```
 
 `set_inner` for dynamic accounts also takes a payer account view and optional rent sysvar:
@@ -160,8 +166,8 @@ self.profile.set_friends(&new_friends, self.signer.to_account_view(), Some(&**se
 
 ```rust
 // In accounts struct:
-pub rent:  &'info Sysvar<Rent>,
-pub clock: &'info Sysvar<Clock>,
+pub rent:  Sysvar<Rent>,
+pub clock: Sysvar<Clock>,
 ```
 
 Usage in impl:
@@ -206,7 +212,7 @@ pub fn create(ctx: CtxWithRemaining<Create>, threshold: u8) -> Result<(), Progra
 ```rust
 use quasar_lang::{prelude::*, remaining::RemainingAccounts};
 
-impl<'info> Create<'info> {
+impl Create {
     pub fn create_multisig(
         &mut self,
         threshold: u8,
@@ -271,10 +277,10 @@ solana-instruction = { version = "3.2.0", features = ["bincode"] }
 
 ## Optional Accounts
 
-Mark a field as optional with `Option<&'info ...>`:
+Mark a field as optional with `Option<...>`:
 
 ```rust
-pub referrer: Option<&'info mut UncheckedAccount>,
+pub referrer: Option<UncheckedAccount>,
 ```
 
 In impl, check with `.is_some()` / `.map()` / `if let Some(r) = self.referrer`.

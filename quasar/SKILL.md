@@ -114,26 +114,30 @@ Key rules:
 
 ## Account Types (QUASAR — not Anchor)
 
-Every accounts struct field is a **reference** with a `'info` lifetime:
+Account struct fields do not use lifetimes.
+Mark writable accounts with `#[account(mut)]`:
 
 ```rust
 // Standard account reference types:
-pub signer:         &'info mut Signer              // writable signer
-pub reader:         &'info Signer                  // read-only signer
-pub unchecked:      &'info mut UncheckedAccount    // unvalidated, writable
-pub my_account:     &'info mut Account<MyStruct>   // typed, writable
-pub readonly_acct:  &'info Account<MyStruct>       // typed, read-only
+#[account(mut)]
+pub signer:         Signer                         // writable signer
+pub reader:         Signer                         // read-only signer
+#[account(mut)]
+pub unchecked:      UncheckedAccount               // unvalidated, writable
+#[account(mut)]
+pub my_account:     Account<MyStruct>              // typed, writable
+pub readonly_acct:  Account<MyStruct>              // typed, read-only
 
-// For accounts with dynamic fields (String/Vec), pass the lifetime through:
-pub config:         Account<MultisigConfig<'info>>  // ← note: no & ref, lifetime threaded
+// Dynamic account data types are still generic by their own definition:
+pub config:         Account<MultisigConfig>
 
 // Programs:
-pub system_program: &'info Program<s>              // system program
-pub token_program:  &'info Program<Token>          // SPL token program
+pub system_program: Program<System>                // system program
+pub token_program:  Program<Token>                 // SPL token program
 
 // Sysvars (read reference file for full usage):
-pub rent:           &'info Sysvar<Rent>
-pub clock:          &'info Sysvar<Clock>
+pub rent:           Sysvar<Rent>
+pub clock:          Sysvar<Clock>
 ```
 
 **Never write `Account<'info, T>`, `Signer<'info>`, `Program<'info, T>` — those are Anchor and will not compile.**
@@ -146,13 +150,15 @@ Address access: `.address()` (never `.key()`)
 
 ```rust
 #[derive(Accounts)]
-pub struct Make<'info> {
-    pub maker: &'info mut Signer,
+pub struct Make {
+    #[account(mut)]
+    pub maker: Signer,
 
     #[account(init, payer = maker, seeds = [b"escrow", maker], bump)]
-    pub escrow: &'info mut Account<Escrow>,
+    pub escrow: Account<Escrow>,
 
     #[account(
+        mut,
         has_one = maker,          // escrow.maker == maker.address()
         has_one = maker_ata_b,    // escrow.maker_ata_b == maker_ata_b.address()
         constraint = escrow.receive > 0,
@@ -160,9 +166,9 @@ pub struct Make<'info> {
         seeds = [b"escrow", maker],
         bump = escrow.bump        // reuse stored bump, saves CUs
     )]
-    pub escrow_close: &'info mut Account<Escrow>,
+    pub escrow_close: Account<Escrow>,
 
-    pub system_program: &'info Program<s>,
+    pub system_program: Program<System>,
 }
 ```
 
@@ -183,11 +189,11 @@ pub struct Escrow {
 
 // With dynamic fields — add a lifetime:
 #[account(discriminator = 2)]
-pub struct Profile<'a> {
+pub struct Profile {
     pub owner: Address,
     pub score: u64,
-    pub name: String<'a, 32>,         // String<'lifetime, MAX_BYTES>
-    pub tags: Vec<'a, Address, 10>,   // Vec<'lifetime, T, MAX_COUNT>
+    pub name: String<32>,             // String<MAX_BYTES>
+    pub tags: Vec<Address, 10>,       // Vec<T, MAX_COUNT>
 }
 ```
 
